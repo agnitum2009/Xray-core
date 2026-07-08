@@ -35,9 +35,9 @@ var (
 	speedLimiters     sync.Map // email/direction -> *userSpeedLimiter
 )
 
-func allowSession(ctx context.Context, email string, limit uint32) bool {
+func beginSession(email string, limit uint32) (func(), bool) {
 	if limit == 0 || email == "" {
-		return true
+		return func() {}, true
 	}
 
 	deviceLimitMu.Lock()
@@ -45,19 +45,51 @@ func allowSession(ctx context.Context, email string, limit uint32) bool {
 	counter := raw.(*atomic.Int32)
 	if counter.Load() >= int32(limit) {
 		deviceLimitMu.Unlock()
-		return false
+		return nil, false
 	}
 	counter.Add(1)
 	deviceLimitMu.Unlock()
 
-	context.AfterFunc(ctx, func() {
-		deviceLimitMu.Lock()
-		if counter.Add(-1) <= 0 {
-			sessionLimitUsers.Delete(email)
-		}
-		deviceLimitMu.Unlock()
-	})
-	return true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			deviceLimitMu.Lock()
+			if counter.Add(-1) <= 0 {
+				sessionLimitUsers.Delete(email)
+			}
+			deviceLimitMu.Unlock()
+		})
+	}, true
+}
+
+type sessionLimitWriter struct {
+	buf.Writer
+	release func()
+}
+
+func (w *sessionLimitWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	err := w.Writer.WriteMultiBuffer(mb)
+	if err != nil {
+		w.release()
+	}
+	return err
+}
+
+func (w *sessionLimitWriter) Close() error {
+	w.release()
+	return common.Close(w.Writer)
+}
+
+func wrapSessionLimitLink(link *transport.Link, release func()) {
+	link.Writer = &sessionLimitWriter{Writer: link.Writer, release: release}
+}
+
+func beginSessionFromContext(ctx context.Context) (func(), bool) {
+	inbound := session.InboundFromContext(ctx)
+	if inbound == nil || inbound.User == nil || inbound.User.Email == "" {
+		return func() {}, true
+	}
+	return beginSession(inbound.User.Email, inbound.User.SessionLimit)
 }
 
 type userSpeedLimiter struct {
@@ -370,11 +402,14 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			closeLink(outboundLink)
 			return inboundLink, outboundLink
 		}
-		if !allowSession(ctx, user.Email, user.SessionLimit) {
+		releaseSession, ok := beginSession(user.Email, user.SessionLimit)
+		if !ok {
 			closeLink(inboundLink)
 			closeLink(outboundLink)
 			return inboundLink, outboundLink
 		}
+		wrapSessionLimitLink(inboundLink, releaseSession)
+		wrapSessionLimitLink(outboundLink, releaseSession)
 
 		p := d.policy.ForLevel(user.Level)
 		if p.Stats.UserUplink {
@@ -429,11 +464,6 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 			closeLink(link)
 			return link
 		}
-		if !allowSession(ctx, user.Email, user.SessionLimit) {
-			closeLink(link)
-			return link
-		}
-
 		p := policyManager.ForLevel(user.Level)
 		if p.Stats.UserUplink {
 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
@@ -587,6 +617,12 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		ctx = session.ContextWithContent(ctx, content)
 	}
 	outbound = WrapLink(ctx, d.policy, d.stats, outbound)
+	releaseSession, ok := beginSessionFromContext(ctx)
+	if !ok {
+		closeLink(outbound)
+		return errors.New("session limit exceeded")
+	}
+	wrapSessionLimitLink(outbound, releaseSession)
 	sniffingRequest := content.SniffingRequest
 	if !sniffingRequest.Enabled {
 		d.routedDispatch(ctx, outbound, destination)

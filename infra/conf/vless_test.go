@@ -98,7 +98,8 @@ func TestVLessInbound(t *testing.T) {
 						"id": "27848739-7e62-4138-9fd3-098a63964b6b",
 						"flow": "xtls-rprx-vision",
 						"level": 0,
-						"email": "love@example.com"
+						"email": "love@example.com",
+						"sessionLimit": 2
 					}
 				],
 				"decryption": "none",
@@ -125,8 +126,9 @@ func TestVLessInbound(t *testing.T) {
 							Id:   "27848739-7e62-4138-9fd3-098a63964b6b",
 							Flow: "xtls-rprx-vision",
 						}),
-						Level: 0,
-						Email: "love@example.com",
+						Level:        0,
+						Email:        "love@example.com",
+						SessionLimit: 2,
 					},
 				},
 				Decryption: "none",
