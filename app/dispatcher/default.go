@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -22,9 +23,138 @@ import (
 	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
+	"golang.org/x/time/rate"
 )
 
 var errSniffingTimeout = errors.New("timeout on sniffing")
+
+var (
+	deviceLimitMu    sync.Mutex
+	deviceLimitUsers sync.Map // email -> *sync.Map(ip -> *atomic.Int32)
+	speedLimiters    sync.Map // email -> *userSpeedLimiter
+)
+
+type userSpeedLimiter struct {
+	limit   uint64
+	limiter *rate.Limiter
+}
+
+func allowDevice(ctx context.Context, email string, limit uint32, ip string) bool {
+	if limit == 0 || email == "" || ip == "" {
+		return true
+	}
+
+	deviceLimitMu.Lock()
+	defer deviceLimitMu.Unlock()
+
+	rawIPs, _ := deviceLimitUsers.LoadOrStore(email, &sync.Map{})
+	ips := rawIPs.(*sync.Map)
+	rawCount, loaded := ips.LoadOrStore(ip, &atomic.Int32{})
+	if !loaded {
+		var devices uint32
+		ips.Range(func(_, _ any) bool {
+			devices++
+			return devices <= limit
+		})
+		if devices > limit {
+			ips.Delete(ip)
+			return false
+		}
+	}
+
+	count := rawCount.(*atomic.Int32)
+	count.Add(1)
+	context.AfterFunc(ctx, func() {
+		deviceLimitMu.Lock()
+		defer deviceLimitMu.Unlock()
+		if count.Add(-1) <= 0 {
+			ips.Delete(ip)
+			empty := true
+			ips.Range(func(_, _ any) bool {
+				empty = false
+				return false
+			})
+			if empty {
+				deviceLimitUsers.Delete(email)
+			}
+		}
+	})
+	return true
+}
+
+func closeLink(link *transport.Link) {
+	if link == nil {
+		return
+	}
+	common.Interrupt(link.Reader)
+	common.Interrupt(link.Writer)
+	_ = common.Close(link.Reader)
+	_ = common.Close(link.Writer)
+}
+
+type speedLimitWriter struct {
+	ctx     context.Context
+	writer  buf.Writer
+	limiter *rate.Limiter
+}
+
+func getSpeedLimiter(email string, bytesPerSecond uint64) *rate.Limiter {
+	if bytesPerSecond == 0 || email == "" {
+		return nil
+	}
+	if raw, ok := speedLimiters.Load(email); ok {
+		current := raw.(*userSpeedLimiter)
+		if current.limit == bytesPerSecond {
+			return current.limiter
+		}
+	}
+	burst := int(bytesPerSecond)
+	if burst < buf.Size {
+		burst = buf.Size
+	}
+	created := &userSpeedLimiter{
+		limit:   bytesPerSecond,
+		limiter: rate.NewLimiter(rate.Limit(bytesPerSecond), burst),
+	}
+	speedLimiters.Store(email, created)
+	return created.limiter
+}
+
+func newSpeedLimitWriter(ctx context.Context, writer buf.Writer, email string, bytesPerSecond uint64) buf.Writer {
+	limiter := getSpeedLimiter(email, bytesPerSecond)
+	if limiter == nil {
+		return writer
+	}
+	return &speedLimitWriter{
+		ctx:     ctx,
+		writer:  writer,
+		limiter: limiter,
+	}
+}
+
+func (w *speedLimitWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	remaining := int(mb.Len())
+	burst := w.limiter.Burst()
+	for remaining > 0 {
+		n := remaining
+		if n > burst {
+			n = burst
+		}
+		if err := w.limiter.WaitN(w.ctx, n); err != nil {
+			return err
+		}
+		remaining -= n
+	}
+	return w.writer.WriteMultiBuffer(mb)
+}
+
+func (w *speedLimitWriter) Close() error {
+	return common.Close(w.writer)
+}
+
+func (w *speedLimitWriter) Interrupt() {
+	common.Interrupt(w.writer)
+}
 
 type cachedReader struct {
 	sync.Mutex
@@ -159,6 +289,12 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	}
 
 	if user != nil && len(user.Email) > 0 {
+		if sessionInbound != nil && !allowDevice(ctx, user.Email, user.DeviceLimit, sessionInbound.Source.Address.String()) {
+			closeLink(inboundLink)
+			closeLink(outboundLink)
+			return inboundLink, outboundLink
+		}
+
 		p := d.policy.ForLevel(user.Level)
 		if p.Stats.UserUplink {
 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
@@ -182,6 +318,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, d.stats, user.Email, sessionInbound.Source.Address.String())
 		}
+		if user.SpeedLimit > 0 {
+			outboundLink.Writer = newSpeedLimitWriter(ctx, outboundLink.Writer, user.Email, user.SpeedLimit)
+		}
 	}
 
 	return inboundLink, outboundLink
@@ -197,6 +336,11 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 	link.Reader = &buf.TimeoutWrapperReader{Reader: link.Reader}
 
 	if user != nil && len(user.Email) > 0 {
+		if sessionInbound != nil && !allowDevice(ctx, user.Email, user.DeviceLimit, sessionInbound.Source.Address.String()) {
+			closeLink(link)
+			return link
+		}
+
 		p := policyManager.ForLevel(user.Level)
 		if p.Stats.UserUplink {
 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
@@ -215,6 +359,9 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		}
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
+		}
+		if user.SpeedLimit > 0 {
+			link.Writer = newSpeedLimitWriter(ctx, link.Writer, user.Email, user.SpeedLimit)
 		}
 	}
 
