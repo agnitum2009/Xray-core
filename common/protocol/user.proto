@@ -17,9 +17,18 @@ message User {
   // the proxies.
   xray.common.serial.TypedMessage account = 3;
 
-  // Per-user speed limit in bytes per second. Zero means unlimited.
+  // Legacy per-user speed limit in bytes per second. Zero means unlimited.
+  // Kept for compatibility and treated as downlink when directional limits are absent.
   uint64 speed_limit = 4;
 
   // Per-user concurrent device/IP limit. Zero means unlimited.
   uint32 device_limit = 5;
+
+  // Per-user uplink limit in bytes per second: client upload / server inbound.
+  // Zero means unlimited.
+  uint64 up_speed_limit = 6;
+
+  // Per-user downlink limit in bytes per second: server outbound / client download.
+  // Zero means unlimited.
+  uint64 down_speed_limit = 7;
 }

@@ -31,7 +31,7 @@ var errSniffingTimeout = errors.New("timeout on sniffing")
 var (
 	deviceLimitMu    sync.Mutex
 	deviceLimitUsers sync.Map // email -> *sync.Map(ip -> *atomic.Int32)
-	speedLimiters    sync.Map // email -> *userSpeedLimiter
+	speedLimiters    sync.Map // email/direction -> *userSpeedLimiter
 )
 
 type userSpeedLimiter struct {
@@ -98,11 +98,16 @@ type speedLimitWriter struct {
 	limiter *rate.Limiter
 }
 
-func getSpeedLimiter(email string, bytesPerSecond uint64) *rate.Limiter {
+func speedLimitKey(email, direction string) string {
+	return email + "\x00" + direction
+}
+
+func getSpeedLimiter(email, direction string, bytesPerSecond uint64) *rate.Limiter {
 	if bytesPerSecond == 0 || email == "" {
 		return nil
 	}
-	if raw, ok := speedLimiters.Load(email); ok {
+	key := speedLimitKey(email, direction)
+	if raw, ok := speedLimiters.Load(key); ok {
 		current := raw.(*userSpeedLimiter)
 		if current.limit == bytesPerSecond {
 			return current.limiter
@@ -116,12 +121,12 @@ func getSpeedLimiter(email string, bytesPerSecond uint64) *rate.Limiter {
 		limit:   bytesPerSecond,
 		limiter: rate.NewLimiter(rate.Limit(bytesPerSecond), burst),
 	}
-	speedLimiters.Store(email, created)
+	speedLimiters.Store(key, created)
 	return created.limiter
 }
 
-func newSpeedLimitWriter(ctx context.Context, writer buf.Writer, email string, bytesPerSecond uint64) buf.Writer {
-	limiter := getSpeedLimiter(email, bytesPerSecond)
+func newSpeedLimitWriter(ctx context.Context, writer buf.Writer, email, direction string, bytesPerSecond uint64) buf.Writer {
+	limiter := getSpeedLimiter(email, direction, bytesPerSecond)
 	if limiter == nil {
 		return writer
 	}
@@ -132,18 +137,25 @@ func newSpeedLimitWriter(ctx context.Context, writer buf.Writer, email string, b
 	}
 }
 
-func (w *speedLimitWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	remaining := int(mb.Len())
-	burst := w.limiter.Burst()
+func waitSpeedLimit(ctx context.Context, limiter *rate.Limiter, bytes int) error {
+	remaining := bytes
+	burst := limiter.Burst()
 	for remaining > 0 {
 		n := remaining
 		if n > burst {
 			n = burst
 		}
-		if err := w.limiter.WaitN(w.ctx, n); err != nil {
+		if err := limiter.WaitN(ctx, n); err != nil {
 			return err
 		}
 		remaining -= n
+	}
+	return nil
+}
+
+func (w *speedLimitWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	if err := waitSpeedLimit(w.ctx, w.limiter, int(mb.Len())); err != nil {
+		return err
 	}
 	return w.writer.WriteMultiBuffer(mb)
 }
@@ -154,6 +166,44 @@ func (w *speedLimitWriter) Close() error {
 
 func (w *speedLimitWriter) Interrupt() {
 	common.Interrupt(w.writer)
+}
+
+type speedLimitReader struct {
+	ctx     context.Context
+	reader  buf.Reader
+	limiter *rate.Limiter
+}
+
+func newSpeedLimitReader(ctx context.Context, reader buf.Reader, email, direction string, bytesPerSecond uint64) buf.Reader {
+	limiter := getSpeedLimiter(email, direction, bytesPerSecond)
+	if limiter == nil {
+		return reader
+	}
+	return &speedLimitReader{
+		ctx:     ctx,
+		reader:  reader,
+		limiter: limiter,
+	}
+}
+
+func (r *speedLimitReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	mb, err := r.reader.ReadMultiBuffer()
+	if err != nil || mb.IsEmpty() {
+		return mb, err
+	}
+	if waitErr := waitSpeedLimit(r.ctx, r.limiter, int(mb.Len())); waitErr != nil {
+		mb = buf.ReleaseMulti(mb)
+		return nil, waitErr
+	}
+	return mb, nil
+}
+
+func (r *speedLimitReader) Close() error {
+	return common.Close(r.reader)
+}
+
+func (r *speedLimitReader) Interrupt() {
+	common.Interrupt(r.reader)
 }
 
 type cachedReader struct {
@@ -318,8 +368,16 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, d.stats, user.Email, sessionInbound.Source.Address.String())
 		}
-		if user.SpeedLimit > 0 {
-			outboundLink.Writer = newSpeedLimitWriter(ctx, outboundLink.Writer, user.Email, user.SpeedLimit)
+		upLimit := user.UpSpeedLimit
+		downLimit := user.DownSpeedLimit
+		if downLimit == 0 {
+			downLimit = user.SpeedLimit
+		}
+		if upLimit > 0 {
+			inboundLink.Writer = newSpeedLimitWriter(ctx, inboundLink.Writer, user.Email, "up", upLimit)
+		}
+		if downLimit > 0 {
+			outboundLink.Writer = newSpeedLimitWriter(ctx, outboundLink.Writer, user.Email, "down", downLimit)
 		}
 	}
 
@@ -360,8 +418,16 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
 		}
-		if user.SpeedLimit > 0 {
-			link.Writer = newSpeedLimitWriter(ctx, link.Writer, user.Email, user.SpeedLimit)
+		upLimit := user.UpSpeedLimit
+		downLimit := user.DownSpeedLimit
+		if downLimit == 0 {
+			downLimit = user.SpeedLimit
+		}
+		if upLimit > 0 {
+			link.Reader = newSpeedLimitReader(ctx, link.Reader, user.Email, "up", upLimit)
+		}
+		if downLimit > 0 {
+			link.Writer = newSpeedLimitWriter(ctx, link.Writer, user.Email, "down", downLimit)
 		}
 	}
 

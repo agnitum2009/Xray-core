@@ -30,12 +30,19 @@ type User struct {
 	// Protocol specific account information. Must be the account proto in one of
 	// the proxies.
 	Account *serial.TypedMessage `protobuf:"bytes,3,opt,name=account,proto3" json:"account,omitempty"`
-	// Per-user speed limit in bytes per second. Zero means unlimited.
+	// Legacy per-user speed limit in bytes per second. Zero means unlimited.
+	// Kept for compatibility and treated as downlink when directional limits are absent.
 	SpeedLimit uint64 `protobuf:"varint,4,opt,name=speed_limit,json=speedLimit,proto3" json:"speed_limit,omitempty"`
 	// Per-user concurrent device/IP limit. Zero means unlimited.
-	DeviceLimit   uint32 `protobuf:"varint,5,opt,name=device_limit,json=deviceLimit,proto3" json:"device_limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DeviceLimit uint32 `protobuf:"varint,5,opt,name=device_limit,json=deviceLimit,proto3" json:"device_limit,omitempty"`
+	// Per-user uplink limit in bytes per second: client upload / server inbound.
+	// Zero means unlimited.
+	UpSpeedLimit uint64 `protobuf:"varint,6,opt,name=up_speed_limit,json=upSpeedLimit,proto3" json:"up_speed_limit,omitempty"`
+	// Per-user downlink limit in bytes per second: server outbound / client download.
+	// Zero means unlimited.
+	DownSpeedLimit uint64 `protobuf:"varint,7,opt,name=down_speed_limit,json=downSpeedLimit,proto3" json:"down_speed_limit,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *User) Reset() {
@@ -103,18 +110,34 @@ func (x *User) GetDeviceLimit() uint32 {
 	return 0
 }
 
+func (x *User) GetUpSpeedLimit() uint64 {
+	if x != nil {
+		return x.UpSpeedLimit
+	}
+	return 0
+}
+
+func (x *User) GetDownSpeedLimit() uint64 {
+	if x != nil {
+		return x.DownSpeedLimit
+	}
+	return 0
+}
+
 var File_common_protocol_user_proto protoreflect.FileDescriptor
 
 const file_common_protocol_user_proto_rawDesc = "" +
 	"\n" +
-	"\x1acommon/protocol/user.proto\x12\x14xray.common.protocol\x1a!common/serial/typed_message.proto\"\xb2\x01\n" +
+	"\x1acommon/protocol/user.proto\x12\x14xray.common.protocol\x1a!common/serial/typed_message.proto\"\x82\x02\n" +
 	"\x04User\x12\x14\n" +
 	"\x05level\x18\x01 \x01(\rR\x05level\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12:\n" +
 	"\aaccount\x18\x03 \x01(\v2 .xray.common.serial.TypedMessageR\aaccount\x12\x1f\n" +
 	"\vspeed_limit\x18\x04 \x01(\x04R\n" +
 	"speedLimit\x12!\n" +
-	"\fdevice_limit\x18\x05 \x01(\rR\vdeviceLimitB^\n" +
+	"\fdevice_limit\x18\x05 \x01(\rR\vdeviceLimit\x12$\n" +
+	"\x0eup_speed_limit\x18\x06 \x01(\x04R\fupSpeedLimit\x12(\n" +
+	"\x10down_speed_limit\x18\a \x01(\x04R\x0edownSpeedLimitB^\n" +
 	"\x18com.xray.common.protocolP\x01Z)github.com/xtls/xray-core/common/protocol\xaa\x02\x14Xray.Common.Protocolb\x06proto3"
 
 var (
