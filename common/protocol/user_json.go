@@ -14,6 +14,8 @@ type jsonUser struct {
 	UpSpeedLimitCamel   uint64 `json:"upSpeedLimit"`
 	DownSpeedLimit      uint64 `json:"down_speed_limit"`
 	DownSpeedLimitCamel uint64 `json:"downSpeedLimit"`
+	SessionLimit        uint32 `json:"session_limit"`
+	SessionLimitCamel   uint32 `json:"sessionLimit"`
 }
 
 func (u *User) UnmarshalJSON(data []byte) error {
@@ -38,6 +40,10 @@ func (u *User) UnmarshalJSON(data []byte) error {
 	u.DownSpeedLimit = raw.DownSpeedLimit
 	if u.DownSpeedLimit == 0 {
 		u.DownSpeedLimit = raw.DownSpeedLimitCamel
+	}
+	u.SessionLimit = raw.SessionLimit
+	if u.SessionLimit == 0 {
+		u.SessionLimit = raw.SessionLimitCamel
 	}
 	return nil
 }

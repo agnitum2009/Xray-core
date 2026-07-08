@@ -36,6 +36,7 @@ func (u *User) ToMemoryUser() (*MemoryUser, error) {
 		DeviceLimit:    u.DeviceLimit,
 		UpSpeedLimit:   u.UpSpeedLimit,
 		DownSpeedLimit: u.DownSpeedLimit,
+		SessionLimit:   u.SessionLimit,
 	}, nil
 }
 
@@ -51,6 +52,7 @@ func ToProtoUser(mu *MemoryUser) *User {
 		DeviceLimit:    mu.DeviceLimit,
 		UpSpeedLimit:   mu.UpSpeedLimit,
 		DownSpeedLimit: mu.DownSpeedLimit,
+		SessionLimit:   mu.SessionLimit,
 	}
 }
 
@@ -64,4 +66,5 @@ type MemoryUser struct {
 	DeviceLimit    uint32
 	UpSpeedLimit   uint64
 	DownSpeedLimit uint64
+	SessionLimit   uint32
 }

@@ -41,8 +41,10 @@ type User struct {
 	// Per-user downlink limit in bytes per second: server outbound / client download.
 	// Zero means unlimited.
 	DownSpeedLimit uint64 `protobuf:"varint,7,opt,name=down_speed_limit,json=downSpeedLimit,proto3" json:"down_speed_limit,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Per-user concurrent session/connection limit. Zero means unlimited.
+	SessionLimit  uint32 `protobuf:"varint,8,opt,name=session_limit,json=sessionLimit,proto3" json:"session_limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *User) Reset() {
@@ -124,11 +126,18 @@ func (x *User) GetDownSpeedLimit() uint64 {
 	return 0
 }
 
+func (x *User) GetSessionLimit() uint32 {
+	if x != nil {
+		return x.SessionLimit
+	}
+	return 0
+}
+
 var File_common_protocol_user_proto protoreflect.FileDescriptor
 
 const file_common_protocol_user_proto_rawDesc = "" +
 	"\n" +
-	"\x1acommon/protocol/user.proto\x12\x14xray.common.protocol\x1a!common/serial/typed_message.proto\"\x82\x02\n" +
+	"\x1acommon/protocol/user.proto\x12\x14xray.common.protocol\x1a!common/serial/typed_message.proto\"\xa7\x02\n" +
 	"\x04User\x12\x14\n" +
 	"\x05level\x18\x01 \x01(\rR\x05level\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12:\n" +
@@ -137,7 +146,8 @@ const file_common_protocol_user_proto_rawDesc = "" +
 	"speedLimit\x12!\n" +
 	"\fdevice_limit\x18\x05 \x01(\rR\vdeviceLimit\x12$\n" +
 	"\x0eup_speed_limit\x18\x06 \x01(\x04R\fupSpeedLimit\x12(\n" +
-	"\x10down_speed_limit\x18\a \x01(\x04R\x0edownSpeedLimitB^\n" +
+	"\x10down_speed_limit\x18\a \x01(\x04R\x0edownSpeedLimit\x12#\n" +
+	"\rsession_limit\x18\b \x01(\rR\fsessionLimitB^\n" +
 	"\x18com.xray.common.protocolP\x01Z)github.com/xtls/xray-core/common/protocol\xaa\x02\x14Xray.Common.Protocolb\x06proto3"
 
 var (

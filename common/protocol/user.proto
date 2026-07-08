@@ -31,4 +31,7 @@ message User {
   // Per-user downlink limit in bytes per second: server outbound / client download.
   // Zero means unlimited.
   uint64 down_speed_limit = 7;
+
+  // Per-user concurrent session/connection limit. Zero means unlimited.
+  uint32 session_limit = 8;
 }

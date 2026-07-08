@@ -29,10 +29,36 @@ import (
 var errSniffingTimeout = errors.New("timeout on sniffing")
 
 var (
-	deviceLimitMu    sync.Mutex
-	deviceLimitUsers sync.Map // email -> *sync.Map(ip -> *atomic.Int32)
-	speedLimiters    sync.Map // email/direction -> *userSpeedLimiter
+	deviceLimitMu     sync.Mutex
+	deviceLimitUsers  sync.Map // email -> *sync.Map(ip -> *atomic.Int32)
+	sessionLimitUsers sync.Map // email -> *atomic.Int32
+	speedLimiters     sync.Map // email/direction -> *userSpeedLimiter
 )
+
+func allowSession(ctx context.Context, email string, limit uint32) bool {
+	if limit == 0 || email == "" {
+		return true
+	}
+
+	deviceLimitMu.Lock()
+	raw, _ := sessionLimitUsers.LoadOrStore(email, &atomic.Int32{})
+	counter := raw.(*atomic.Int32)
+	if counter.Load() >= int32(limit) {
+		deviceLimitMu.Unlock()
+		return false
+	}
+	counter.Add(1)
+	deviceLimitMu.Unlock()
+
+	context.AfterFunc(ctx, func() {
+		deviceLimitMu.Lock()
+		if counter.Add(-1) <= 0 {
+			sessionLimitUsers.Delete(email)
+		}
+		deviceLimitMu.Unlock()
+	})
+	return true
+}
 
 type userSpeedLimiter struct {
 	limit   uint64
@@ -344,6 +370,11 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			closeLink(outboundLink)
 			return inboundLink, outboundLink
 		}
+		if !allowSession(ctx, user.Email, user.SessionLimit) {
+			closeLink(inboundLink)
+			closeLink(outboundLink)
+			return inboundLink, outboundLink
+		}
 
 		p := d.policy.ForLevel(user.Level)
 		if p.Stats.UserUplink {
@@ -395,6 +426,10 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 
 	if user != nil && len(user.Email) > 0 {
 		if sessionInbound != nil && !allowDevice(ctx, user.Email, user.DeviceLimit, sessionInbound.Source.Address.String()) {
+			closeLink(link)
+			return link
+		}
+		if !allowSession(ctx, user.Email, user.SessionLimit) {
 			closeLink(link)
 			return link
 		}
